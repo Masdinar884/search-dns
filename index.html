@@ -75,6 +75,11 @@ tbody tr:hover{background:var(--surface-2);}
 .badge.txt{background:rgba(255,255,255,.06);color:var(--muted);}
 .badge.ns{background:rgba(255,255,255,.06);color:var(--muted);}
 .empty{color:var(--muted);font-size:13.5px;padding:30px 4px;text-align:center;border:1px dashed var(--line);border-radius:8px;}
+.proto-row{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:14px;}
+.proto-check{display:flex;align-items:center;gap:7px;font-size:13.5px;color:var(--text);cursor:pointer;user-select:none;}
+.proto-check input{accent-color:var(--accent);width:15px;height:15px;cursor:pointer;}
+.proto-note{font-size:12px;color:var(--muted);flex:1;min-width:220px;}
+.url-cell{word-break:break-all;}
 .log{font-size:12px;color:#5C6470;margin-top:10px;min-height:16px;}
 
 ::selection{background:var(--accent);color:#0E1220;}
@@ -99,6 +104,7 @@ tbody tr:hover{background:var(--surface-2);}
     <div class="tabs">
       <button class="tab active" data-tab="sub">Subdomain</button>
       <button class="tab" data-tab="dns">DNS Records</button>
+      <button class="tab" data-tab="search">Cari Halaman</button>
     </div>
 
     <div class="tabpanel active" id="tab-sub">
@@ -115,6 +121,20 @@ tbody tr:hover{background:var(--surface-2);}
       </div>
       <div id="dnsResults"><div class="empty">Belum ada hasil.</div></div>
     </div>
+
+    <div class="tabpanel" id="tab-search">
+      <div class="proto-row">
+        <label class="proto-check"><input type="checkbox" id="protoHttp" checked> http</label>
+        <label class="proto-check"><input type="checkbox" id="protoHttps" checked> https</label>
+        <span class="proto-note">Menampilkan URL lengkap yang merespons — status isi halaman (200/404) tidak selalu bisa dipastikan dari browser karena batasan CORS.</span>
+      </div>
+      <div class="result-meta">
+        <span class="count">URL ditemukan: <b id="searchCount">0</b></span>
+        <button class="ghost" id="exportSearchBtn" disabled>Ekspor CSV</button>
+      </div>
+      <div id="searchResults"><div class="empty">Belum ada hasil.</div></div>
+      <div class="log" id="searchLog"></div>
+    </div>
   </div>
 
 </div>
@@ -130,8 +150,15 @@ const dnsResults = $('dnsResults');
 const subCount = $('subCount');
 const dnsCount = $('dnsCount');
 const subLog = $('subLog');
+const searchResults = $('searchResults');
+const searchCount = $('searchCount');
+const searchLog = $('searchLog');
+const exportSearchBtn = $('exportSearchBtn');
+const protoHttp = $('protoHttp');
+const protoHttps = $('protoHttps');
 
 let lastSubdomainRows = [];
+let lastSearchRows = [];
 
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => {
@@ -158,6 +185,24 @@ const WORDLIST = ["www","mail","ftp","webmail","smtp","pop","ns1","ns2","ns3","n
 "consul","nomad","terraform","aws","azure","gcp","s3","storage","cdn3","img","img1","img2","assets2","fonts",
 "api2","api-v1","api-v2","v1","v2","graphql","rest","soap","ws","socket","websocket","rtmp","rtsp","ns","ns0",
 "mta","mta1","relay","bounce","list","lists","newsletter","campaign","marketing","promo","landing","lp"
+];
+
+const PATH_WORDLIST = [
+"admin","administrator","admin.php","admin/login","login","login.php","wp-admin","wp-login.php","dashboard",
+"cpanel","phpmyadmin","control-panel","panel","manage","account","accounts","register","signup","signin",
+"config","config.php","configuration.php","settings","setup","install","install.php","setup.php",
+".env",".env.local",".env.production",".git",".git/config",".svn",".htaccess",".htpasswd","web.config",
+"backup","backup.zip","backup.sql","backup.tar.gz","database.sql","db.sql","dump.sql","data.sql",
+"robots.txt","sitemap.xml","sitemap_index.xml","humans.txt","security.txt",".well-known/security.txt",
+"crossdomain.xml","ads.txt","app-ads.txt","manifest.json","service-worker.js","sw.js",
+"api","api/v1","api/v2","api-docs","apidocs","docs","documentation","swagger","swagger.json","swagger-ui",
+"openapi.json","graphql","rest","status","health","healthz","ping","version","actuator","actuator/health",
+"metrics","console","server-status","server-info","phpinfo.php","info.php","test","test.php","testing",
+"staging","dev","beta","demo","sample","example","old","old-site","tmp","temp","private","secret","hidden",
+"uploads","upload","download","downloads","files","assets","static","media","images","css","js",
+"includes","inc","lib","vendor","node_modules","cgi-bin","logs","log","error_log","debug.log",
+"xmlrpc.php","license.txt","readme.html","readme.md","changelog.txt","composer.json","package.json",
+"wp-content","wp-includes","wp-config.php","feed","rss","atom.xml","sitemap"
 ];
 
 function setStatus(text, tone){
@@ -275,6 +320,82 @@ async function runSubdomainScan(domain){
   }
 }
 
+async function checkUrlReachable(url){
+  // Cross-origin requests can't be read (CORS), so we use no-cors mode:
+  // this tells us the request didn't fail outright (DNS/connection error),
+  // but NOT the actual HTTP status code of the page.
+  try{
+    await fetch(url, { mode: 'no-cors', method: 'GET', cache: 'no-store' });
+    return true;
+  }catch(e){
+    return false;
+  }
+}
+
+async function runPathSearch(domain){
+  lastSearchRows = [];
+  searchResults.innerHTML = '';
+  searchCount.textContent = '0';
+  exportSearchBtn.disabled = true;
+
+  const protocols = [];
+  if (protoHttp.checked) protocols.push('http');
+  if (protoHttps.checked) protocols.push('https');
+
+  if (protocols.length === 0){
+    searchResults.innerHTML = '<div class="empty">Pilih minimal satu protokol (http/https).</div>';
+    searchLog.textContent = '';
+    return;
+  }
+
+  const candidates = [];
+  protocols.forEach(proto => {
+    PATH_WORDLIST.forEach(path => candidates.push(`${proto}://${domain}/${path}`));
+  });
+
+  let found = 0, checked = 0;
+  const total = candidates.length;
+
+  let table = document.createElement('table');
+  table.innerHTML = '<thead><tr><th>URL</th></tr></thead><tbody></tbody>';
+  searchResults.appendChild(table);
+  const tbody = table.querySelector('tbody');
+
+  await pMapLimit(candidates, 20, async (url) => {
+    const ok = await checkUrlReachable(url);
+    checked++;
+    searchLog.textContent = `Memeriksa ${checked}/${total}&hellip;`;
+    if (ok){
+      found++;
+      lastSearchRows.push({ url });
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="url-cell">${escapeHtml(url)}</td>`;
+      tbody.appendChild(tr);
+      searchCount.textContent = found;
+    }
+  });
+
+  searchLog.textContent = `Selesai memeriksa ${total} kandidat URL.`;
+  if (found === 0){
+    searchResults.innerHTML = '<div class="empty">Tidak ada URL yang merespons.</div>';
+  } else {
+    exportSearchBtn.disabled = false;
+  }
+}
+
+function exportSearchCsv(){
+  if (!lastSearchRows.length) return;
+  let csv = 'url\n';
+  lastSearchRows.forEach(r => { csv += `"${r.url}"\n`; });
+  const blob = new Blob([csv], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'urls.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 async function runScan(){
   const raw = domainInput.value;
   const domain = normalizeDomain(raw);
@@ -287,7 +408,7 @@ async function runScan(){
   setStatus(`Memeriksa <b>${domain}</b>&hellip;`);
 
   try{
-    await Promise.all([ runDnsRecords(domain), runSubdomainScan(domain) ]);
+    await Promise.all([ runDnsRecords(domain), runSubdomainScan(domain), runPathSearch(domain) ]);
     setStatus(`Selesai untuk <b>${domain}</b>.`, 'ok');
   }catch(e){
     setStatus('Gagal mengambil data. Coba lagi.', 'err');
@@ -312,6 +433,7 @@ function exportCsv(){
 
 scanBtn.addEventListener('click', runScan);
 exportBtn.addEventListener('click', exportCsv);
+exportSearchBtn.addEventListener('click', exportSearchCsv);
 domainInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runScan(); });
 </script>
 </body>
